@@ -615,6 +615,28 @@ inline TextureDesc FixTextureDesc(const TextureDesc& textureDesc) {
     return desc;
 }
 
+// Packed tail: every extent is 0 and "mipOffset" is the first packed mip. Zero extents on a standard mip mean "WHOLE_SIZE".
+inline bool IsSparsePackedTail(const TextureDesc& textureDesc, const TextureTilingDesc& tilingDesc, const TextureRegionDesc& region) {
+    const Dim_t firstPackedMip = tilingDesc.packedMipNum == 0 ? textureDesc.mipNum : (Dim_t)(textureDesc.mipNum - tilingDesc.packedMipNum);
+
+    return region.width == 0 && region.height == 0 && region.depth == 0 && region.mipOffset == firstPackedMip && tilingDesc.packedMipNum != 0;
+}
+
+inline TextureRegionDesc ExpandWholeSizeRegion(GraphicsAPI graphicsAPI, const TextureDesc& textureDesc, const TextureRegionDesc& region) {
+    TextureRegionDesc expanded = region;
+
+    if (expanded.width == WHOLE_SIZE)
+        expanded.width = GetDimension(graphicsAPI, textureDesc, 0, region.mipOffset);
+
+    if (expanded.height == WHOLE_SIZE)
+        expanded.height = GetDimension(graphicsAPI, textureDesc, 1, region.mipOffset);
+
+    if (expanded.depth == WHOLE_SIZE)
+        expanded.depth = GetDimension(graphicsAPI, textureDesc, 2, region.mipOffset);
+
+    return expanded;
+}
+
 inline bool CompareUid(const Uid_t& a, const Uid_t& b) {
     return a.low == b.low && a.high == b.high;
 }
