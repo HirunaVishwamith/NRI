@@ -229,6 +229,10 @@ static void NRI_CALL GetTextureMemoryDesc2(const Device& device, const TextureDe
     ((DeviceD3D11&)device).GetMemoryDesc(textureDesc, memoryLocation, memoryDesc);
 }
 
+static void NRI_CALL GetTextureTiling(const Texture&, TextureTilingDesc& tilingDesc) {
+    tilingDesc = {};
+}
+
 static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
     Result result = ((DeviceD3D11&)device).CreateImplementation<BufferD3D11>(buffer, bufferDesc);
     if (result == Result::SUCCESS)
@@ -492,6 +496,10 @@ static void NRI_CALL GetCalibratedTimestamps(Queue&, uint64_t& timestampGPU, uin
 
 static Result NRI_CALL QueueSubmit(Queue& queue, const QueueSubmitDesc& queueSubmitDesc) {
     return ((QueueD3D11&)queue).Submit(queueSubmitDesc);
+}
+
+static Result NRI_CALL QueueBindSparse(Queue&, const SparseBufferMappingDesc*, uint32_t, const SparseTextureMappingDesc*, uint32_t) {
+    return Result::UNSUPPORTED;
 }
 
 static Result NRI_CALL QueueWaitIdle(Queue* queue) {
@@ -810,6 +818,7 @@ Result DeviceD3D11::FillFunctionTable(CoreInterface& table) const {
     table.CreateTexture = ::CreateTexture;
     table.GetBufferMemoryDesc = ::GetBufferMemoryDesc;
     table.GetTextureMemoryDesc = ::GetTextureMemoryDesc;
+    table.GetTextureTiling = ::GetTextureTiling;
     table.BindBufferMemory = ::BindBufferMemory;
     table.BindTextureMemory = ::BindTextureMemory;
     table.GetBufferMemoryDesc2 = ::GetBufferMemoryDesc2;
@@ -829,6 +838,7 @@ Result DeviceD3D11::FillFunctionTable(CoreInterface& table) const {
     table.GetQuerySize = ::GetQuerySize;
     table.GetCalibratedTimestamps = ::GetCalibratedTimestamps;
     table.QueueSubmit = ::QueueSubmit;
+    table.QueueBindSparse = ::QueueBindSparse;
     table.QueueWaitIdle = ::QueueWaitIdle;
     table.DeviceWaitIdle = ::DeviceWaitIdle;
     table.Wait = ::Wait;

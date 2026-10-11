@@ -256,6 +256,10 @@ static void NRI_CALL GetTextureMemoryDesc2(const Device& device, const TextureDe
     ((DeviceMetal&)device).GetMemoryDesc2(textureDesc, memoryLocation, memoryDesc);
 }
 
+static void NRI_CALL GetTextureTiling(const Texture&, TextureTilingDesc& tilingDesc) {
+    tilingDesc = {};
+}
+
 static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
     MaybeUnused(priority);
 
@@ -509,6 +513,10 @@ static Result NRI_CALL QueueSubmit(Queue& queue, const QueueSubmitDesc& queueSub
     return ((QueueMetal&)queue).Submit(queueSubmitDesc);
 }
 
+static Result NRI_CALL QueueBindSparse(Queue&, const SparseBufferMappingDesc*, uint32_t, const SparseTextureMappingDesc*, uint32_t) {
+    return Result::UNSUPPORTED;
+}
+
 static Result NRI_CALL DeviceWaitIdle(Device* device) {
     if (!device)
         return Result::SUCCESS;
@@ -644,6 +652,7 @@ Result DeviceMetal::FillFunctionTable(CoreInterface& table) const {
     table.CreateTexture = ::CreateTexture;
     table.GetBufferMemoryDesc = ::GetBufferMemoryDesc;
     table.GetTextureMemoryDesc = ::GetTextureMemoryDesc;
+    table.GetTextureTiling = ::GetTextureTiling;
     table.BindBufferMemory = ::BindBufferMemory;
     table.BindTextureMemory = ::BindTextureMemory;
     table.GetBufferMemoryDesc2 = ::GetBufferMemoryDesc2;
@@ -706,6 +715,7 @@ Result DeviceMetal::FillFunctionTable(CoreInterface& table) const {
     table.GetCalibratedTimestamps = ::GetCalibratedTimestamps;
     table.ResetQueries = ::ResetQueries;
     table.QueueSubmit = ::QueueSubmit;
+    table.QueueBindSparse = ::QueueBindSparse;
     table.QueueWaitIdle = ::QueueWaitIdle;
     table.DeviceWaitIdle = ::DeviceWaitIdle;
     table.Wait = ::Wait;
