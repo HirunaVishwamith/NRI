@@ -42,6 +42,7 @@ There is [NVRHI](https://github.com/NVIDIA-RTX/NVRHI), which offers a *D3D11*-li
  - *Platform Flexibility* - Windows, Linux, MacOS, and Android support
  - *Developer Experience* - integrated GAPI- and NRI- validation, VK [printf](https://github.com/KhronosGroup/*Vulkan*-ValidationLayers/blob/main/docs/debug_printf.md), and timeline annotations (GAPI, [NVTX](https://github.com/NVIDIA/NVTX) and [PIX](https://devblogs.microsoft.com/pix/winpixeventruntime/), if "WinPixEventRuntime.dll" is nearby)
  - *Memory Management* - deep integration with *AMD Virtual Memory Allocator* to ease memory management and memory reuse
+ - *Sparse resources* - D3D12 reserved (tiled) resources and Vulkan sparse residency. Create them with `TextureUsageBits::SPARSE` or `BufferUsageBits::SPARSE`, query texture tiles with `GetTextureTiling`, and bind tiles from one or more `Memory` pools with `QueueBindSparse` (ordered with `QueueSubmit` on that queue). On Vulkan, bind the metadata range from that tiling query before using the texture. D3D11, Metal and WebGPU report the feature as unsupported
 
 Available interfaces:
  - `NRI.h` - core functionality

@@ -718,7 +718,8 @@ NriBits(TextureUsageBits, uint16_t,                 // Min compatible access:   
     HOST_TRANSFER                       = NriBit(6),    // HOST_READ/HOST_WRITE                     Synchronous copy between texture and host memory
     VIDEO_DECODE                        = NriBit(7),    // VIDEO_DECODE                             Video decode output / DPB picture
     VIDEO_ENCODE                        = NriBit(8),    // VIDEO_ENCODE                             Video encode input / DPB picture
-    VIDEO_REFERENCE_ONLY                = NriBit(9)     // VIDEO_*                                  Video DPB/reference-only allocation
+    VIDEO_REFERENCE_ONLY                = NriBit(9),    // VIDEO_*                                  Video DPB/reference-only allocation
+    SPARSE                              = NriBit(10)    // reserved / sparse residency              Tiles are bound with "QueueBindSparse", not "BindTextureMemory"
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkBufferUsageFlagBits.html
@@ -738,7 +739,8 @@ NriBits(BufferUsageBits, uint16_t,                  // Min compatible access:   
     MICROMAP_STORAGE                    = NriBit(11),   // MICROMAP_READ/WRITE                      (INTERNAL) micromap storage
     VIDEO_DECODE                        = NriBit(12),   // VIDEO_DECODE                             Video decode bitstream input
     VIDEO_ENCODE                        = NriBit(13),   // VIDEO_ENCODE                             Video encode bitstream output
-    CONDITIONAL_RENDERING               = NriBit(14)    // CONDITIONAL_RENDERING                    Predicate for "CmdBeginConditionalRendering"
+    CONDITIONAL_RENDERING               = NriBit(14),   // CONDITIONAL_RENDERING                    Predicate for "CmdBeginConditionalRendering"
+    SPARSE                              = NriBit(15)    // reserved / sparse residency              Tiles are bound with "QueueBindSparse", not "BindBufferMemory". "size" is a multiple of "DeviceDesc::sparse.tileSize"
 );
 
 NriEnum(VideoCodec, uint8_t,
@@ -834,6 +836,44 @@ NriStruct(BindTextureMemoryDesc) {
     NriPtr(Texture) texture;
     NriPtr(Memory) memory;
     uint64_t offset; // in memory
+};
+
+// Sparse / reserved resources (D3D12 tiled resources, Vulkan sparse residency)
+// - create with "TextureUsageBits::SPARSE" or "BufferUsageBits::SPARSE"
+// - do not use "Bind*Memory", "CreateCommitted*" or "CreatePlaced*"
+// - bind tiles with "QueueBindSparse" on a queue that supports sparse binding
+// - binds are ordered with "QueueSubmit" on the same queue
+// - there are no hidden barriers: do not use tiles while a bind that affects them is in flight
+// - "Memory" is the tile pool. Several "Memory" objects may back one resource
+// - "memoryOffset" is relative to the start of that "Memory" (the backend adds the allocation offset)
+// - Vulkan metadata ("TextureTilingDesc::metadataSize") must be bound before the texture is used. D3D12 reports 0
+// - one full-residency "Memory": tiles at offset 0, metadata immediately after ("totalTileNum * tileSize" bytes)
+// - D3D11, Metal, WebGPU and NONE keep "features.sparseTexture" and "features.sparseBuffer" false
+NriEnum(SparseMapping, uint8_t,
+    BIND,   // "memory" is required
+    UNMAP   // "memory" is ignored
+);
+
+NriStruct(SparseBufferMappingDesc) {
+    const NriPtr(Buffer) buffer;            // requires "BufferUsageBits::SPARSE"
+    uint64_t offset;                        // multiple of "DeviceDesc::sparse.tileSize"
+    uint64_t size;                          // multiple of "DeviceDesc::sparse.tileSize"
+    NriOptional NriPtr(Memory) memory;      // required for "BIND"
+    uint64_t memoryOffset;                  // multiple of "DeviceDesc::sparse.tileSize", relative to "memory"
+    Nri(SparseMapping) mapping;
+};
+
+// Standard-mip tile shape is in texels. "packedTileNum" is one tail (one array slice, or the single tail when "singlePackedTail" is true)
+// "metadataSize" is not included in "totalTileNum"
+NriStruct(TextureTilingDesc) {
+    Nri(Dim_t) tileWidth;
+    Nri(Dim_t) tileHeight;
+    Nri(Dim_t) tileDepth;
+    Nri(Dim_t) packedMipNum;
+    uint32_t packedTileNum;
+    uint32_t totalTileNum;
+    uint64_t metadataSize; // Vulkan sparse metadata in bytes, 0 when none (always 0 on D3D12)
+    bool singlePackedTail;
 };
 
 #pragma endregion
@@ -1819,6 +1859,21 @@ NriStruct(TextureRegionDesc) {
     Nri(PlaneBits) planes;
 };
 
+// "region" is in texels.
+// - standard mips: tile-aligned, or the far edge may land on the subresource boundary
+// - packed mip tail: "width", "height" and "depth" are all 0 and "mipOffset" is the first packed mip (one tail, one array slice)
+// - the same zero extents on a standard mip mean "WHOLE_SIZE" and cover that mip. Do not use "WHOLE_SIZE" to select the tail
+// - "region.planes" is ignored: every non-metadata aspect is bound
+// - "metadata" ignores "region" and binds "TextureTilingDesc::metadataSize" bytes
+NriStruct(SparseTextureMappingDesc) {
+    const NriPtr(Texture) texture;          // requires "TextureUsageBits::SPARSE"
+    Nri(TextureRegionDesc) region;
+    NriOptional NriPtr(Memory) memory;      // required for "BIND"
+    uint64_t memoryOffset;                  // multiple of "DeviceDesc::sparse.tileSize", relative to "memory"
+    Nri(SparseMapping) mapping;
+    NriOptional bool metadata;
+};
+
 NriStruct(TextureDataLayoutDesc) {
     uint64_t offset;        // a buffer offset must be a multiple of "uploadBufferTextureSliceAlignment" (data placement alignment)
     uint32_t rowPitch;      // must be a multiple of "uploadBufferTextureRowAlignment"
@@ -2299,6 +2354,8 @@ NriStruct(DeviceDesc) {
         bool extendedDynamicState;                                // VK: allows to use "VertexBufferDesc::stride" (dynamic) instead of "VertexStreamDesc::stride" (static). Widely supported
         bool unifiedTextureLayouts;                               // VK: allows to use "GENERAL" everywhere: https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_unified_image_layouts.html
         bool resourceAliasing;                                    // binding multiple distinct texture or buffer objects to overlap the same underlying memory allocation (unsupported only in D3D11)
+        bool sparseTexture;                                       // "TextureUsageBits::SPARSE", "GetTextureTiling", "QueueBindSparse" (D3D12 and Vulkan)
+        bool sparseBuffer;                                        // "BufferUsageBits::SPARSE", "QueueBindSparse" (D3D12 tiled tier >= 2 and Vulkan)
     } features;
 
     // Shader features
@@ -2364,6 +2421,16 @@ NriStruct(DeviceDesc) {
             bool AV1;
         } encode;
     } videoFeatures;
+
+    // Sparse / reserved resources. "tileSize" is 0 when both sparse features are false
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_tiled_resources_tier
+    // https://docs.vulkan.org/spec/latest/chapters/sparsemem.html
+    // D3D12 tier 1: non-array Texture2D only. Tier 2 adds arrays, buffers and MSAA. Tier 3 adds Texture3D
+    // VK: 2 when standard 2D sparse residency is supported (arrays included), 3 when standard 3D residency is supported too
+    struct {
+        uint32_t tileSize; // bytes
+        uint8_t tier;
+    } sparse;
 };
 
 #pragma endregion

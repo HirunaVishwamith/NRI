@@ -119,6 +119,7 @@ NriStruct(CoreInterface) {
     Nri(Result)         (NRI_CALL *CreateTexture)                   (NriRef(Device) device, const NriRef(TextureDesc) textureDesc, NriOut NriRef(Texture*) texture);
     void                (NRI_CALL *GetBufferMemoryDesc)             (const NriRef(Buffer) buffer, Nri(MemoryLocation) memoryLocation, NriOut NriRef(MemoryDesc) memoryDesc);
     void                (NRI_CALL *GetTextureMemoryDesc)            (const NriRef(Texture) texture, Nri(MemoryLocation) memoryLocation, NriOut NriRef(MemoryDesc) memoryDesc);
+    void                (NRI_CALL *GetTextureTiling)                (const NriRef(Texture) texture, NriOut NriRef(TextureTilingDesc) tilingDesc); // requires "TextureUsageBits::SPARSE"
     Nri(Result)         (NRI_CALL *BindBufferMemory)                (const NriPtr(BindBufferMemoryDesc) bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum);
     Nri(Result)         (NRI_CALL *BindTextureMemory)               (const NriPtr(BindTextureMemoryDesc) bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum);
 
@@ -244,6 +245,9 @@ NriStruct(CoreInterface) {
 
     // Work submission and synchronization
     Nri(Result)         (NRI_CALL *QueueSubmit)                     (NriRef(Queue) queue, const NriRef(QueueSubmitDesc) queueSubmitDesc); // to device
+    // Ordered with "QueueSubmit" on the same queue. Not thread safe. Empty input returns "SUCCESS"
+    // Requires "features.sparseBuffer" / "features.sparseTexture". The graphics queue supports it when that feature is enabled
+    Nri(Result)         (NRI_CALL *QueueBindSparse)                 (NriRef(Queue) queue, const NriPtr(SparseBufferMappingDesc) bufferMappings, uint32_t bufferMappingNum, const NriPtr(SparseTextureMappingDesc) textureMappings, uint32_t textureMappingNum);
     Nri(Result)         (NRI_CALL *QueueWaitIdle)                   (NriPtr(Queue) queue);
     Nri(Result)         (NRI_CALL *DeviceWaitIdle)                  (NriPtr(Device) device);
     void                (NRI_CALL *Wait)                            (NriRef(Fence) fence, uint64_t value); // on host
