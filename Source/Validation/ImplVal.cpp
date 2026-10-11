@@ -529,6 +529,17 @@ static void NRI_CALL GetTextureMemoryDesc(const Texture& texture, MemoryLocation
     deviceVal.RegisterMemoryType(memoryDesc.type, memoryLocation);
 }
 
+static void NRI_CALL GetTextureTiling(const Texture& texture, TextureTilingDesc& tilingDesc) {
+    tilingDesc = {};
+
+    const TextureVal& textureVal = (TextureVal&)texture;
+    DeviceVal& deviceVal = textureVal.GetDevice();
+
+    NRI_RETURN_ON_FAILURE(&deviceVal, textureVal.GetDesc().usage & TextureUsageBits::SPARSE, ReturnVoid(), "'TextureUsageBits::SPARSE' is required");
+
+    deviceVal.GetCoreInterfaceImpl().GetTextureTiling(*textureVal.GetImpl(), tilingDesc);
+}
+
 static Result NRI_CALL BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
     if (!bindBufferMemoryDescNum)
         return Result::SUCCESS;
@@ -815,6 +826,10 @@ static Result NRI_CALL QueueSubmit(Queue& queue, const QueueSubmitDesc& queueSub
     return ((QueueVal&)queue).Submit(queueSubmitDesc);
 }
 
+static Result NRI_CALL QueueBindSparse(Queue& queue, const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum) {
+    return ((QueueVal&)queue).BindSparse(bufferMappings, bufferMappingNum, textureMappings, textureMappingNum);
+}
+
 static Result NRI_CALL QueueWaitIdle(Queue* queue) {
     if (!queue)
         return Result::SUCCESS;
@@ -1033,6 +1048,7 @@ Result DeviceVal::FillFunctionTable(CoreInterface& table) const {
     table.CreateTexture = ::CreateTexture;
     table.GetBufferMemoryDesc = ::GetBufferMemoryDesc;
     table.GetTextureMemoryDesc = ::GetTextureMemoryDesc;
+    table.GetTextureTiling = ::GetTextureTiling;
     table.BindBufferMemory = ::BindBufferMemory;
     table.BindTextureMemory = ::BindTextureMemory;
     table.GetBufferMemoryDesc2 = ::GetBufferMemoryDesc2;
@@ -1096,6 +1112,7 @@ Result DeviceVal::FillFunctionTable(CoreInterface& table) const {
     table.GetQuerySize = ::GetQuerySize;
     table.GetCalibratedTimestamps = ::GetCalibratedTimestamps;
     table.QueueSubmit = ::QueueSubmit;
+    table.QueueBindSparse = ::QueueBindSparse;
     table.QueueWaitIdle = ::QueueWaitIdle;
     table.DeviceWaitIdle = ::DeviceWaitIdle;
     table.Wait = ::Wait;

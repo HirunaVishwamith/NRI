@@ -281,15 +281,59 @@ NRI_INLINE Result DeviceVal::CreateDescriptorPool(const DescriptorPoolDesc& desc
     return result;
 }
 
+static Result ValidateSparseBuffer(DeviceVal& device, const BufferDesc& bufferDesc) {
+    if (!(bufferDesc.usage & BufferUsageBits::SPARSE))
+        return Result::SUCCESS;
+
+    const DeviceDesc& deviceDesc = device.GetDesc();
+
+    NRI_RETURN_ON_FAILURE(&device, deviceDesc.features.sparseBuffer && deviceDesc.sparse.tileSize != 0, Result::UNSUPPORTED, "'features.sparseBuffer' is false");
+    NRI_RETURN_ON_FAILURE(&device, (bufferDesc.size % deviceDesc.sparse.tileSize) == 0, Result::INVALID_ARGUMENT, "'size' must be a multiple of 'sparse.tileSize'");
+    NRI_RETURN_ON_FAILURE(&device, !(bufferDesc.usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE)), Result::UNSUPPORTED, "'BufferUsageBits::SPARSE' is not supported for video buffers");
+
+    return Result::SUCCESS;
+}
+
+static Result ValidateSparseTexture(DeviceVal& device, const TextureDesc& textureDesc) {
+    if (!(textureDesc.usage & TextureUsageBits::SPARSE))
+        return Result::SUCCESS;
+
+    const DeviceDesc& deviceDesc = device.GetDesc();
+    const Dim_t layerNum = std::max(textureDesc.layerNum, (Dim_t)1);
+    const Sample_t sampleNum = std::max(textureDesc.sampleNum, (Sample_t)1);
+    const bool supportedSampleCount = sampleNum == 1 || sampleNum == 2 || sampleNum == 4 || sampleNum == 8 || sampleNum == 16;
+
+    NRI_RETURN_ON_FAILURE(&device, deviceDesc.features.sparseTexture && deviceDesc.sparse.tileSize != 0, Result::UNSUPPORTED, "'features.sparseTexture' is false");
+    NRI_RETURN_ON_FAILURE(&device, textureDesc.type != TextureType::TEXTURE_1D, Result::UNSUPPORTED, "sparse 'TEXTURE_1D' is not supported");
+    NRI_RETURN_ON_FAILURE(&device, textureDesc.type != TextureType::TEXTURE_3D || deviceDesc.sparse.tier >= 3, Result::UNSUPPORTED, "sparse 'TEXTURE_3D' requires 'sparse.tier >= 3'");
+    NRI_RETURN_ON_FAILURE(&device, layerNum == 1 || deviceDesc.sparse.tier >= 2, Result::UNSUPPORTED, "sparse texture arrays require 'sparse.tier >= 2'");
+    NRI_RETURN_ON_FAILURE(&device, supportedSampleCount, Result::INVALID_ARGUMENT, "'sampleNum' must be 1, 2, 4, 8 or 16");
+    NRI_RETURN_ON_FAILURE(&device, sampleNum == 1 || deviceDesc.sparse.tier >= 2, Result::UNSUPPORTED, "multisample sparse textures require 'sparse.tier >= 2'");
+    NRI_RETURN_ON_FAILURE(&device, !(textureDesc.usage & (TextureUsageBits::VIDEO_DECODE | TextureUsageBits::VIDEO_ENCODE | TextureUsageBits::VIDEO_REFERENCE_ONLY)), Result::UNSUPPORTED, "'TextureUsageBits::SPARSE' is not supported for video textures");
+
+    return Result::SUCCESS;
+}
+
 NRI_INLINE Result DeviceVal::CreateBuffer(const BufferDesc& bufferDesc, Buffer*& buffer) {
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
+
+    const Result sparseResult = ValidateSparseBuffer(*this, bufferDesc);
+
+    if (sparseResult != Result::SUCCESS)
+        return sparseResult;
 
     Buffer* bufferImpl = nullptr;
     Result result = m_iCoreImpl.CreateBuffer(m_Impl, bufferDesc, bufferImpl);
 
     buffer = nullptr;
-    if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, false);
+    if (result == Result::SUCCESS) {
+        BufferVal* bufferVal = Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, false);
+
+        if (bufferDesc.usage & BufferUsageBits::SPARSE)
+            bufferVal->SetBoundToMemory(nullptr);
+
+        buffer = (Buffer*)bufferVal;
+    }
 
     return result;
 }
@@ -313,12 +357,23 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureDesc& textureDesc, Textu
     constexpr TextureUsageBits attachmentBits = TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT | TextureUsageBits::SHADING_RATE_ATTACHMENT;
     NRI_RETURN_ON_FAILURE(this, textureDesc.sharingMode != SharingMode::EXCLUSIVE || (textureDesc.usage & attachmentBits), Result::INVALID_ARGUMENT, "'EXCLUSIVE' is needed only for attachments to enable DCC on some HW");
 
+    const Result sparseResult = ValidateSparseTexture(*this, textureDesc);
+
+    if (sparseResult != Result::SUCCESS)
+        return sparseResult;
+
     Texture* textureImpl = nullptr;
     Result result = m_iCoreImpl.CreateTexture(m_Impl, textureDesc, textureImpl);
 
     texture = nullptr;
-    if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, false);
+    if (result == Result::SUCCESS) {
+        TextureVal* textureVal = Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, false);
+
+        if (textureDesc.usage & TextureUsageBits::SPARSE)
+            textureVal->SetBoundToMemory(nullptr);
+
+        texture = (Texture*)textureVal;
+    }
 
     return result;
 }
@@ -905,6 +960,7 @@ NRI_INLINE void DeviceVal::DestroyFence(Fence* fence) {
 NRI_INLINE Result DeviceVal::CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
     NRI_RETURN_ON_FAILURE(this, priority >= -1.0f && priority <= 1.0f, Result::INVALID_ARGUMENT, "'priority' outside of [-1; 1] range");
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
+    NRI_RETURN_ON_FAILURE(this, !(bufferDesc.usage & BufferUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'BufferUsageBits::SPARSE' resources are bound with 'QueueBindSparse'");
 
     Buffer* bufferImpl = nullptr;
     Result result = m_iCoreImpl.CreateCommittedBuffer(m_Impl, memoryLocation, priority, bufferDesc, bufferImpl);
@@ -935,6 +991,7 @@ NRI_INLINE Result DeviceVal::CreateCommittedTexture(MemoryLocation memoryLocatio
 
     constexpr TextureUsageBits attachmentBits = TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT | TextureUsageBits::SHADING_RATE_ATTACHMENT;
     NRI_RETURN_ON_FAILURE(this, textureDesc.sharingMode != SharingMode::EXCLUSIVE || (textureDesc.usage & attachmentBits), Result::INVALID_ARGUMENT, "'EXCLUSIVE' is needed only for attachments to enable DCC on some HW");
+    NRI_RETURN_ON_FAILURE(this, !(textureDesc.usage & TextureUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'TextureUsageBits::SPARSE' resources are bound with 'QueueBindSparse'");
 
     Texture* textureImpl = nullptr;
     Result result = m_iCoreImpl.CreateCommittedTexture(m_Impl, memoryLocation, priority, textureDesc, textureImpl);
@@ -1025,6 +1082,7 @@ NRI_INLINE Result DeviceVal::CreateCommittedAccelerationStructure(MemoryLocation
 
 NRI_INLINE Result DeviceVal::CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
+    NRI_RETURN_ON_FAILURE(this, !(bufferDesc.usage & BufferUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'BufferUsageBits::SPARSE' resources are bound with 'QueueBindSparse'");
 
     if (memory) {
         MemoryVal& memoryVal = *(MemoryVal*)memory;
@@ -1080,6 +1138,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedTexture(Memory* memory, uint64_t offset
 
     constexpr TextureUsageBits attachmentBits = TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT | TextureUsageBits::SHADING_RATE_ATTACHMENT;
     NRI_RETURN_ON_FAILURE(this, textureDesc.sharingMode != SharingMode::EXCLUSIVE || (textureDesc.usage & attachmentBits), Result::INVALID_ARGUMENT, "'EXCLUSIVE' is needed only for attachments to enable DCC on some HW");
+    NRI_RETURN_ON_FAILURE(this, !(textureDesc.usage & TextureUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'TextureUsageBits::SPARSE' resources are bound with 'QueueBindSparse'");
 
     if (memory) {
         MemoryVal& memoryVal = *(MemoryVal*)memory;
@@ -1865,6 +1924,7 @@ NRI_INLINE Result DeviceVal::BindBufferMemory(const BindBufferMemoryDesc* bindBu
         MemoryVal& memoryVal = *(MemoryVal*)bindBufferMemoryDesc.memory;
         BufferVal& bufferVal = *(BufferVal*)bindBufferMemoryDesc.buffer;
 
+        NRI_RETURN_ON_FAILURE(this, !(bufferVal.GetDesc().usage & BufferUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'[%u].buffer' uses 'BufferUsageBits::SPARSE'. Bind tiles with 'QueueBindSparse'", i);
         NRI_RETURN_ON_FAILURE(this, !bufferVal.IsBoundToMemory(), Result::INVALID_ARGUMENT, "'[%u].buffer' is already bound to memory", i);
 
         BindBufferMemoryDesc& bindBufferMemoryDescImpl = bindBufferMemoryDescsImpl[i];
@@ -1909,6 +1969,7 @@ NRI_INLINE Result DeviceVal::BindTextureMemory(const BindTextureMemoryDesc* bind
         MemoryVal& memoryVal = *(MemoryVal*)bindTextureMemoryDesc.memory;
         TextureVal& textureVal = *(TextureVal*)bindTextureMemoryDesc.texture;
 
+        NRI_RETURN_ON_FAILURE(this, !(textureVal.GetDesc().usage & TextureUsageBits::SPARSE), Result::INVALID_ARGUMENT, "'[%u].texture' uses 'TextureUsageBits::SPARSE'. Bind tiles with 'QueueBindSparse'", i);
         NRI_RETURN_ON_FAILURE(this, !textureVal.IsBoundToMemory(), Result::INVALID_ARGUMENT, "'[%u].texture' is already bound to memory", i);
 
         BindTextureMemoryDesc& bindTextureMemoryDescImpl = bindTextureMemoryDescsImpl[i];
