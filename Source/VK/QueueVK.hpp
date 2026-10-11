@@ -1,10 +1,11 @@
 // © 2021 NVIDIA Corporation
 
-Result QueueVK::Create(QueueType type, uint32_t familyIndex, VkQueue handle, Lock* sharedLock) {
+Result QueueVK::Create(QueueType type, uint32_t familyIndex, VkQueue handle, Lock* sharedLock, bool familySparse) {
     m_Type = type;
     m_FamilyIndex = familyIndex;
     m_Handle = handle;
     m_Lock = sharedLock ? sharedLock : &m_OwnLock;
+    m_FamilySparse = familySparse;
 
     return Result::SUCCESS;
 }
@@ -121,6 +122,207 @@ NRI_INLINE Result QueueVK::Submit(const QueueSubmitDesc& queueSubmitDesc) {
     const auto& vk = m_Device.GetDispatchTable();
     VkResult vkResult = vk.QueueSubmit2(m_Handle, 1, &submitInfo, VK_NULL_HANDLE);
     NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "QueueSubmit2");
+
+    return Result::SUCCESS;
+}
+
+static uint32_t AppendSparseAspects(VkImageAspectFlags aspectMask, const VkSparseImageMemoryBind& prototype, VkSparseImageMemoryBind* binds, uint32_t bindNum) {
+    const VkImageAspectFlags aspects[] = {
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_IMAGE_ASPECT_STENCIL_BIT,
+    };
+
+    for (uint32_t i = 0; i < GetCountOf(aspects); i++) {
+        if (aspectMask & aspects[i]) {
+            binds[bindNum] = prototype;
+            binds[bindNum].subresource.aspectMask = aspects[i];
+            bindNum++;
+        }
+    }
+
+    return bindNum;
+}
+
+NRI_INLINE Result QueueVK::BindSparse(const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum) {
+    if (bufferMappingNum == 0 && textureMappingNum == 0)
+        return Result::SUCCESS;
+
+    if (!m_FamilySparse)
+        return Result::UNSUPPORTED;
+
+    uint32_t opaqueCapacity = textureMappingNum;
+
+    for (uint32_t i = 0; i < textureMappingNum; i++) {
+        if (!textureMappings[i].metadata)
+            continue;
+
+        const TextureVK& texture = *(const TextureVK*)textureMappings[i].texture;
+        const uint32_t layers = texture.GetMetadataLayerNum();
+
+        if (layers == 0)
+            return Result::FAILURE;
+
+        if (layers > 1 && opaqueCapacity > (UINT32_MAX - (layers - 1)))
+            return Result::FAILURE;
+
+        if (layers > 1)
+            opaqueCapacity += layers - 1;
+    }
+
+    ExclusiveScope lock(*m_Lock);
+
+    Scratch<VkSparseMemoryBind> bufferBinds = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseMemoryBind, bufferMappingNum);
+    Scratch<VkSparseBufferMemoryBindInfo> bufferInfos = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseBufferMemoryBindInfo, bufferMappingNum);
+    Scratch<VkSparseMemoryBind> opaqueBinds = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseMemoryBind, opaqueCapacity);
+    Scratch<VkSparseImageOpaqueMemoryBindInfo> opaqueInfos = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseImageOpaqueMemoryBindInfo, textureMappingNum);
+    Scratch<VkSparseImageMemoryBind> imageBinds = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseImageMemoryBind, textureMappingNum * 3);
+    Scratch<VkSparseImageMemoryBindInfo> imageInfos = NRI_ALLOCATE_SCRATCH(m_Device, VkSparseImageMemoryBindInfo, textureMappingNum);
+
+    uint32_t bufferInfoNum = 0;
+    uint32_t opaqueBindNum = 0;
+    uint32_t opaqueInfoNum = 0;
+    uint32_t imageInfoNum = 0;
+    uint32_t imageBindNum = 0;
+
+    for (uint32_t i = 0; i < bufferMappingNum; i++) {
+        const SparseBufferMappingDesc& mapping = bufferMappings[i];
+        const BufferVK& buffer = *(const BufferVK*)mapping.buffer;
+        VkSparseMemoryBind& bind = bufferBinds[i];
+        bind = {};
+        bind.resourceOffset = mapping.offset;
+        bind.size = mapping.size;
+
+        if (mapping.mapping == SparseMapping::BIND) {
+            const MemoryVK& memory = *(const MemoryVK*)mapping.memory;
+            bind.memory = memory.GetHandle();
+            bind.memoryOffset = memory.GetOffset() + mapping.memoryOffset;
+        }
+
+        const VkBuffer handle = buffer.GetHandle();
+
+        if (bufferInfoNum == 0 || bufferInfos[bufferInfoNum - 1].buffer != handle) {
+            VkSparseBufferMemoryBindInfo& info = bufferInfos[bufferInfoNum++];
+            info = {};
+            info.buffer = handle;
+            info.pBinds = &bind;
+        }
+
+        bufferInfos[bufferInfoNum - 1].bindCount++;
+    }
+
+    for (uint32_t i = 0; i < textureMappingNum; i++) {
+        const SparseTextureMappingDesc& mapping = textureMappings[i];
+        const TextureVK& texture = *(const TextureVK*)mapping.texture;
+        const TextureDesc& textureDesc = texture.GetDesc();
+        const TextureTilingDesc& tiling = texture.GetTiling();
+        const VkImage handle = texture.GetHandle();
+
+        VkDeviceMemory memoryHandle = VK_NULL_HANDLE;
+        VkDeviceSize memoryOffset = 0;
+
+        if (mapping.mapping == SparseMapping::BIND) {
+            const MemoryVK& memory = *(const MemoryVK*)mapping.memory;
+            memoryHandle = memory.GetHandle();
+            memoryOffset = memory.GetOffset() + mapping.memoryOffset;
+        }
+
+        if (mapping.metadata) {
+            const uint32_t layers = texture.GetMetadataLayerNum();
+            const VkDeviceSize layerSize = texture.GetMetadataSize();
+            const uint32_t tileSize = m_Device.GetDesc().sparse.tileSize;
+
+            if (layers == 0 || layerSize == 0 || tileSize == 0)
+                return Result::FAILURE;
+
+            const VkDeviceSize alignedLayerSize = ((layerSize + tileSize - 1) / tileSize) * tileSize;
+            const uint32_t firstBind = opaqueBindNum;
+
+            for (uint32_t layer = 0; layer < layers; layer++) {
+                VkSparseMemoryBind& bind = opaqueBinds[opaqueBindNum];
+                bind = {};
+                bind.resourceOffset = texture.GetMetadataOffset() + (VkDeviceSize)layer * texture.GetMetadataStride();
+                bind.size = layerSize;
+                bind.memory = memoryHandle;
+                bind.memoryOffset = memoryOffset + (VkDeviceSize)layer * alignedLayerSize;
+                bind.flags = VK_SPARSE_MEMORY_BIND_METADATA_BIT;
+                opaqueBindNum++;
+            }
+
+            if (opaqueInfoNum == 0 || opaqueInfos[opaqueInfoNum - 1].image != handle) {
+                VkSparseImageOpaqueMemoryBindInfo& info = opaqueInfos[opaqueInfoNum];
+                info = {};
+                info.image = handle;
+                info.pBinds = &opaqueBinds[firstBind];
+                opaqueInfoNum++;
+            }
+
+            opaqueInfos[opaqueInfoNum - 1].bindCount += layers;
+
+            continue;
+        }
+
+        if (IsSparsePackedTail(textureDesc, tiling, mapping.region)) {
+            VkSparseMemoryBind& bind = opaqueBinds[opaqueBindNum];
+            bind = {};
+            bind.resourceOffset = texture.GetMipTailOffset();
+
+            if (!tiling.singlePackedTail)
+                bind.resourceOffset += (VkDeviceSize)mapping.region.layerOffset * texture.GetMipTailStride();
+
+            bind.size = texture.GetMipTailSize();
+            bind.memory = memoryHandle;
+            bind.memoryOffset = memoryOffset;
+
+            if (opaqueInfoNum == 0 || opaqueInfos[opaqueInfoNum - 1].image != handle) {
+                VkSparseImageOpaqueMemoryBindInfo& info = opaqueInfos[opaqueInfoNum];
+                info = {};
+                info.image = handle;
+                info.pBinds = &bind;
+                opaqueInfoNum++;
+            }
+
+            opaqueInfos[opaqueInfoNum - 1].bindCount++;
+            opaqueBindNum++;
+        } else {
+            const TextureRegionDesc expanded = ExpandWholeSizeRegion(GraphicsAPI::VK, textureDesc, mapping.region);
+            const uint32_t firstBind = imageBindNum;
+
+            VkSparseImageMemoryBind prototype = {};
+            prototype.subresource.mipLevel = mapping.region.mipOffset;
+            prototype.subresource.arrayLayer = mapping.region.layerOffset;
+            prototype.offset = {(int32_t)expanded.x, (int32_t)expanded.y, (int32_t)expanded.z};
+            prototype.extent = {expanded.width, expanded.height, expanded.depth};
+            prototype.memory = memoryHandle;
+            prototype.memoryOffset = memoryOffset;
+
+            imageBindNum = AppendSparseAspects(texture.GetSparseAspectMask(), prototype, imageBinds, imageBindNum);
+
+            if (imageBindNum == firstBind)
+                return Result::FAILURE;
+
+            if (imageInfoNum == 0 || imageInfos[imageInfoNum - 1].image != handle) {
+                VkSparseImageMemoryBindInfo& info = imageInfos[imageInfoNum++];
+                info = {};
+                info.image = handle;
+                info.pBinds = &imageBinds[firstBind];
+            }
+
+            imageInfos[imageInfoNum - 1].bindCount += imageBindNum - firstBind;
+        }
+    }
+
+    VkBindSparseInfo bindInfo = {VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+    bindInfo.bufferBindCount = bufferInfoNum;
+    bindInfo.pBufferBinds = bufferInfos;
+    bindInfo.imageOpaqueBindCount = opaqueInfoNum;
+    bindInfo.pImageOpaqueBinds = opaqueInfos;
+    bindInfo.imageBindCount = imageInfoNum;
+    bindInfo.pImageBinds = imageInfos;
+
+    const auto& vk = m_Device.GetDispatchTable();
+    const VkResult vkResult = vk.QueueBindSparse(m_Handle, 1, &bindInfo, VK_NULL_HANDLE);
+    NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkQueueBindSparse");
 
     return Result::SUCCESS;
 }

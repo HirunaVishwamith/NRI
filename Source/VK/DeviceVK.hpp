@@ -826,6 +826,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                 m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] = familyVideoProps[queueFamilyVKDesc.familyIndex].videoCodecOperations & VIDEO_DECODE_CODEC_OPERATION_MASK;
             else if (queueFamilyVKDesc.queueType == QueueType::VIDEO_ENCODE && queueFamilyVKDesc.queueNum)
                 m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] = familyVideoProps[queueFamilyVKDesc.familyIndex].videoCodecOperations & VIDEO_ENCODE_CODEC_OPERATION_MASK;
+
+            if (queueFamilyVKDesc.queueType == QueueType::GRAPHICS && queueFamilyVKDesc.familyIndex < familyNum)
+                m_GraphicsFamilySparse = (familyProps2[queueFamilyVKDesc.familyIndex].queueFamilyProperties.queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
         }
     } else {
         std::array<uint32_t, (size_t)QueueType::MAX_NUM> scores = {};
@@ -854,6 +857,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                     m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] = videoCodecOperations & VIDEO_DECODE_CODEC_OPERATION_MASK;
                 else if (queueType == QueueType::VIDEO_ENCODE)
                     m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] = videoCodecOperations & VIDEO_ENCODE_CODEC_OPERATION_MASK;
+                else if (queueType == QueueType::GRAPHICS)
+                    m_GraphicsFamilySparse = props.sparse;
 
                 queueType = TrySelectPreferredQueueType(props, scores);
             }
@@ -1045,6 +1050,20 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     m_IsSupported.videoMaintenance2 = VideoMaintenance2Features.videoMaintenance2;
     m_IsSupported.videoEncodeAV1 = VideoEncodeAV1Features.videoEncodeAV1;
     m_IsSupported.descriptorHeap = DescriptorHeapFeatures.descriptorHeap && ShaderUntypedPointersFeatures.shaderUntypedPointers && features12.bufferDeviceAddress;
+    m_IsSupported.sparseAliased = features.features.sparseResidencyAliased != 0;
+    m_SparseSampleMask = 0;
+
+    if (features.features.sparseResidency2Samples)
+        m_SparseSampleMask |= 1;
+
+    if (features.features.sparseResidency4Samples)
+        m_SparseSampleMask |= 2;
+
+    if (features.features.sparseResidency8Samples)
+        m_SparseSampleMask |= 4;
+
+    if (features.features.sparseResidency16Samples)
+        m_SparseSampleMask |= 8;
 #ifdef __APPLE__
     m_IsSupported.imageView2DOn3D = !IsExtensionSupported(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME, desiredDeviceExts) || PortabilitySubsetFeatures.imageView2DOn3DImage;
 #else
@@ -1144,7 +1163,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
 
                     QueueVK* queue;
                     Lock* sharedLock = FindQueueLock(m_QueueFamilies, handle);
-                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyVKDesc.queueType, queueFamilyVKDesc.familyIndex, handle, sharedLock);
+                    const uint32_t familyIndex = queueFamilyVKDesc.familyIndex;
+                    const bool familySparse = familyIndex < familyNum && (familyProps2[familyIndex].queueFamilyProperties.queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
+                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyVKDesc.queueType, familyIndex, handle, sharedLock, familySparse);
                     if (result == Result::SUCCESS)
                         queueFamily.push_back(queue);
                 }
@@ -1170,7 +1191,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
 
                     QueueVK* queue;
                     Lock* sharedLock = FindQueueLock(m_QueueFamilies, handle);
-                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyDesc.queueType, queueInfo.queueFamilyIndex, handle, sharedLock);
+                    const uint32_t familyIndex = queueInfo.queueFamilyIndex;
+                    const bool familySparse = familyIndex < familyNum && (familyProps2[familyIndex].queueFamilyProperties.queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
+                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyDesc.queueType, familyIndex, handle, sharedLock, familySparse);
                     if (result == Result::SUCCESS)
                         queueFamily.push_back(queue);
                 }
@@ -1648,6 +1671,50 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.unifiedTextureLayouts = UnifiedImageLayoutsFeatures.unifiedImageLayouts;
         m_Desc.features.resourceAliasing = true;
 
+        const bool familySparse = m_GraphicsFamilySparse && features.features.sparseBinding != 0;
+        const bool standard2D = props.properties.sparseProperties.residencyStandard2DBlockShape != 0;
+        const bool standard3D = props.properties.sparseProperties.residencyStandard3DBlockShape != 0;
+        const bool bufferResidency = familySparse && features.features.sparseResidencyBuffer != 0;
+        const bool textureResidency = familySparse && features.features.sparseResidencyImage2D != 0 && standard2D;
+        uint32_t bufferTileSize = 0;
+
+        if (bufferResidency) {
+            VkBufferCreateInfo sparseBufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            sparseBufferInfo.size = 1;
+            sparseBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            sparseBufferInfo.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+
+            VkBuffer sparseBuffer = VK_NULL_HANDLE;
+            const VkResult sparseResult = m_VK.CreateBuffer(m_Device, &sparseBufferInfo, m_AllocationCallbackPtr, &sparseBuffer);
+
+            if (sparseResult == VK_SUCCESS) {
+                VkMemoryRequirements2 sparseRequirements = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+                VkBufferMemoryRequirementsInfo2 sparseBufferRequirements = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2};
+                sparseBufferRequirements.buffer = sparseBuffer;
+                m_VK.GetBufferMemoryRequirements2(m_Device, &sparseBufferRequirements, &sparseRequirements);
+                m_VK.DestroyBuffer(m_Device, sparseBuffer, m_AllocationCallbackPtr);
+
+                const VkDeviceSize alignment = sparseRequirements.memoryRequirements.alignment;
+
+                if (alignment != 0 && alignment <= UINT32_MAX && (alignment & (alignment - 1)) == 0)
+                    bufferTileSize = (uint32_t)alignment;
+            }
+        }
+
+        const bool sparseBuffer = bufferTileSize != 0;
+        const bool sparseTexture = textureResidency && ((sparseBuffer && bufferTileSize == 65536) || !sparseBuffer);
+        const uint32_t tileSize = sparseBuffer ? bufferTileSize : (sparseTexture ? 65536u : 0u);
+
+        m_Desc.features.sparseBuffer = sparseBuffer;
+        m_Desc.features.sparseTexture = sparseTexture && tileSize == 65536;
+        m_Desc.sparse.tileSize = (m_Desc.features.sparseBuffer || m_Desc.features.sparseTexture) ? tileSize : 0;
+        m_Desc.sparse.tier = 0;
+
+        if (m_Desc.features.sparseTexture)
+            m_Desc.sparse.tier = (standard3D && features.features.sparseResidencyImage3D) ? 3 : 2;
+        else if (m_Desc.features.sparseBuffer)
+            m_Desc.sparse.tier = 2;
+
         const VkVideoCodecOperationFlagsKHR decodeCodecOperations = m_IsSupported.videoMaintenance1 ? GetVideoCodecOperations(true, false) : 0;
         m_Desc.videoFeatures.decode.H264 = (decodeCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0;
         m_Desc.videoFeatures.decode.H265 = (decodeCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0;
@@ -1733,6 +1800,13 @@ void DeviceVK::FillCreateInfo(const BufferDesc& bufferDesc, VkBufferCreateInfo& 
 
     if (m_IsSupported.videoMaintenance1 && (bufferDesc.usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE)))
         info.flags |= VK_BUFFER_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
+
+    if (bufferDesc.usage & BufferUsageBits::SPARSE) {
+        info.flags |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+
+        if (m_IsSupported.sparseAliased)
+            info.flags |= VK_BUFFER_CREATE_SPARSE_ALIASED_BIT;
+    }
 }
 
 void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo& info) const {
@@ -1751,6 +1825,15 @@ void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo&
         flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT; // allow 3D demotion to a set of layers // TODO: hook up "VK_EXT_image_2d_view_of_3d"?
     if (m_Desc.tiers.sampleLocations && formatProps.isDepth)
         flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+
+    if (textureDesc.usage & TextureUsageBits::SPARSE) {
+        // "VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT" is incompatible with sparse residency (VUID-VkImageCreateInfo-flags-09403)
+        flags &= ~(VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT);
+        flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT;
+
+        if (m_IsSupported.sparseAliased)
+            flags |= VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
+    }
 
     const VkImageUsageFlags usage = GetImageUsageFlags(textureDesc.usage);
     const bool hasVideoDpbUsage = (usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) != 0;
@@ -1775,6 +1858,9 @@ void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo&
     info.queueFamilyIndexCount = m_NumActiveFamilyIndices;
     info.pQueueFamilyIndices = m_ActiveQueueFamilyIndices.data();
     info.initialLayout = IsMemoryZeroInitializationEnabled() ? VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT : VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (textureDesc.usage & TextureUsageBits::SPARSE)
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 void DeviceVK::FillCreateInfo(const SamplerDesc& samplerDesc, VkSamplerCreateInfo& info, VkSamplerReductionModeCreateInfo& reductionModeInfo, VkSamplerCustomBorderColorCreateInfoEXT& borderColorInfo) const {
@@ -1841,6 +1927,15 @@ void DeviceVK::GetMemoryDesc2(const BufferDesc& bufferDesc, MemoryLocation memor
 
     memoryDesc = {};
     GetMemoryDesc(memoryLocation, requirements.memoryRequirements, dedicatedRequirements, memoryDesc);
+
+    if (bufferDesc.usage & BufferUsageBits::SPARSE) {
+        memoryDesc.size = 0;
+
+        if (m_Desc.sparse.tileSize != 0)
+            memoryDesc.alignment = m_Desc.sparse.tileSize;
+
+        ClearMustBeDedicated(memoryDesc);
+    }
 }
 
 void DeviceVK::GetMemoryDesc2(const TextureDesc& textureDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) const {
@@ -1860,6 +1955,15 @@ void DeviceVK::GetMemoryDesc2(const TextureDesc& textureDesc, MemoryLocation mem
 
     memoryDesc = {};
     GetMemoryDesc(memoryLocation, requirements.memoryRequirements, dedicatedRequirements, memoryDesc);
+
+    if (textureDesc.usage & TextureUsageBits::SPARSE) {
+        memoryDesc.size = 0;
+
+        if (m_Desc.sparse.tileSize != 0)
+            memoryDesc.alignment = m_Desc.sparse.tileSize;
+
+        ClearMustBeDedicated(memoryDesc);
+    }
 }
 
 void DeviceVK::GetMemoryDesc2(const AccelerationStructureDesc& accelerationStructureDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
@@ -2340,6 +2444,8 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
     GET_DEVICE_CORE_FUNC(CmdBeginRenderPass);
     GET_DEVICE_CORE_FUNC(CmdEndRenderPass);
     GET_DEVICE_CORE_FUNC(EndCommandBuffer);
+    GET_DEVICE_CORE_FUNC(GetImageSparseMemoryRequirements);
+    GET_DEVICE_CORE_FUNC(QueueBindSparse);
 
     // v1.1
     GET_DEVICE_CORE_FUNC(BindBufferMemory2);

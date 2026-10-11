@@ -134,6 +134,7 @@ struct IsSupported {
     uint32_t videoEncodeAV1               : 1;
     uint32_t descriptorHeap               : 1;
     uint32_t imageView2DOn3D              : 1;
+    uint32_t sparseAliased                : 1;
 };
 
 static_assert(sizeof(IsSupported) == sizeof(uint32_t), "4 bytes expected");
@@ -165,6 +166,10 @@ struct DeviceVK final : public DeviceBase {
 
     inline const DispatchTable& GetDispatchTable() const {
         return m_VK;
+    }
+
+    inline uint8_t GetSparseSampleMask() const {
+        return m_SparseSampleMask;
     }
 
     inline const VkAllocationCallbacks* GetVkAllocationCallbacks() const {
@@ -332,6 +337,8 @@ private:
     bool m_OwnsNativeObjects = true;
     bool m_IsMemoryZeroInitializationEnabled = false;
     bool m_IsDeviceLostInfoReported = false;
+    bool m_GraphicsFamilySparse = false;
+    uint8_t m_SparseSampleMask = 0;
 
     Lock m_Lock;
     Lock m_TransferContextLock;

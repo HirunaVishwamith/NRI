@@ -20,12 +20,33 @@ Result BufferVK::Create(const BufferDesc& bufferDesc) {
     if ((bufferDesc.usage & BufferUsageBits::CONDITIONAL_RENDERING) && !m_Device.GetDesc().features.conditionalRendering)
         return Result::UNSUPPORTED;
 
+    if (m_Desc.usage & BufferUsageBits::SPARSE) {
+        const DeviceDesc& deviceDesc = m_Device.GetDesc();
+
+        if (!deviceDesc.features.sparseBuffer || deviceDesc.sparse.tileSize == 0)
+            return Result::UNSUPPORTED;
+
+        if (m_Desc.usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE))
+            return Result::UNSUPPORTED;
+
+        if ((m_Desc.size % deviceDesc.sparse.tileSize) != 0)
+            return Result::INVALID_ARGUMENT;
+    }
+
     VkBufferCreateInfo info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     FillCreateInfo(info);
 
     const auto& vk = m_Device.GetDispatchTable();
     VkResult vkResult = vk.CreateBuffer(m_Device, &info, m_Device.GetVkAllocationCallbacks(), &m_Handle);
     NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkCreateBuffer");
+
+    // Sparse binding assigns the device address at creation, before any tiles are bound.
+    if ((m_Desc.usage & BufferUsageBits::SPARSE) && m_Device.m_IsSupported.deviceAddress) {
+        VkBufferDeviceAddressInfo bufferDeviceAddressInfo = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        bufferDeviceAddressInfo.buffer = m_Handle;
+
+        m_DeviceAddress = vk.GetBufferDeviceAddress(m_Device, &bufferDeviceAddressInfo);
+    }
 
     return Result::SUCCESS;
 }
@@ -60,6 +81,9 @@ Result BufferVK::CreateDescriptorHeap(uint64_t size, uint64_t alignment) {
 }
 
 Result BufferVK::AllocateAndBindMemory(MemoryLocation memoryLocation, float priority, bool committed) {
+    if (m_Desc.usage & BufferUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(m_Handle, "Unexpected");
 
     MemoryDesc memoryDesc = {};
@@ -148,6 +172,9 @@ Result BufferVK::AllocateAndBindMemory(MemoryLocation memoryLocation, float prio
 }
 
 Result BufferVK::BindMemory(MemoryVK& memory, uint64_t offset, bool bindMemory) {
+    if (m_Desc.usage & BufferUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(m_Handle, "Unexpected");
     NRI_CHECK(m_OwnsNativeObjects, "Not for wrapped objects");
 
@@ -224,8 +251,18 @@ void BufferVK::GetMemoryDesc(MemoryLocation memoryLocation, MemoryDesc& memoryDe
         requirements.memoryRequirements.alignment = std::max(requirements.memoryRequirements.alignment, scratchBufferOffset);
     }
 
+    if (m_Desc.usage & BufferUsageBits::SPARSE) {
+        const uint32_t tileSize = m_Device.GetDesc().sparse.tileSize;
+
+        if (tileSize != 0)
+            requirements.memoryRequirements.alignment = std::max(requirements.memoryRequirements.alignment, (VkDeviceSize)tileSize);
+    }
+
     memoryDesc = {};
     m_Device.GetMemoryDesc(memoryLocation, requirements.memoryRequirements, dedicatedRequirements, memoryDesc);
+
+    if (m_Desc.usage & BufferUsageBits::SPARSE)
+        ClearMustBeDedicated(memoryDesc);
 }
 
 Result BufferVK::FlushMappedRange(uint64_t offset, uint64_t size) {

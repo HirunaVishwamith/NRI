@@ -219,6 +219,10 @@ static void NRI_CALL GetTextureMemoryDesc(const Texture& texture, MemoryLocation
     ((TextureVK&)texture).GetMemoryDesc(memoryLocation, memoryDesc);
 }
 
+static void NRI_CALL GetTextureTiling(const Texture& texture, TextureTilingDesc& tilingDesc) {
+    tilingDesc = ((const TextureVK&)texture).GetTiling();
+}
+
 static Result NRI_CALL BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
     if (!bindBufferMemoryDescNum)
         return Result::SUCCESS;
@@ -250,7 +254,14 @@ static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memo
     if (result != Result::SUCCESS)
         return result;
 
-    return ((BufferVK*)buffer)->AllocateAndBindMemory(memoryLocation, priority, true);
+    result = ((BufferVK*)buffer)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS && (bufferDesc.usage & BufferUsageBits::SPARSE)) {
+        Destroy((BufferVK*)buffer);
+        buffer = nullptr;
+    }
+
+    return result;
 }
 
 static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
@@ -260,7 +271,14 @@ static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation mem
     if (result != Result::SUCCESS)
         return result;
 
-    return ((TextureVK*)texture)->AllocateAndBindMemory(memoryLocation, priority, true);
+    result = ((TextureVK*)texture)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS && (textureDesc.usage & TextureUsageBits::SPARSE)) {
+        Destroy((TextureVK*)texture);
+        texture = nullptr;
+    }
+
+    return result;
 }
 
 static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
@@ -274,6 +292,11 @@ static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64
         result = ((BufferVK*)buffer)->BindMemory(*(MemoryVK*)memory, offset, true);
     else
         result = ((BufferVK*)buffer)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+
+    if (result != Result::SUCCESS && (bufferDesc.usage & BufferUsageBits::SPARSE)) {
+        Destroy((BufferVK*)buffer);
+        buffer = nullptr;
+    }
 
     return result;
 }
@@ -289,6 +312,11 @@ static Result NRI_CALL CreatePlacedTexture(Device& device, Memory* memory, uint6
         result = ((TextureVK*)texture)->BindMemory(*(MemoryVK*)memory, offset);
     else
         result = ((TextureVK*)texture)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+
+    if (result != Result::SUCCESS && (textureDesc.usage & TextureUsageBits::SPARSE)) {
+        Destroy((TextureVK*)texture);
+        texture = nullptr;
+    }
 
     return result;
 }
@@ -543,6 +571,10 @@ static Result NRI_CALL QueueSubmit(Queue& queue, const QueueSubmitDesc& workSubm
     return ((QueueVK&)queue).Submit(workSubmissionDesc);
 }
 
+static Result NRI_CALL QueueBindSparse(Queue& queue, const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum) {
+    return ((QueueVK&)queue).BindSparse(bufferMappings, bufferMappingNum, textureMappings, textureMappingNum);
+}
+
 static Result NRI_CALL QueueWaitIdle(Queue* queue) {
     if (!queue)
         return Result::SUCCESS;
@@ -702,6 +734,7 @@ Result DeviceVK::FillFunctionTable(CoreInterface& table) const {
     table.CreateTexture = ::CreateTexture;
     table.GetBufferMemoryDesc = ::GetBufferMemoryDesc;
     table.GetTextureMemoryDesc = ::GetTextureMemoryDesc;
+    table.GetTextureTiling = ::GetTextureTiling;
     table.BindBufferMemory = ::BindBufferMemory;
     table.BindTextureMemory = ::BindTextureMemory;
     table.GetBufferMemoryDesc2 = ::GetBufferMemoryDesc2;
@@ -765,6 +798,7 @@ Result DeviceVK::FillFunctionTable(CoreInterface& table) const {
     table.GetQuerySize = ::GetQuerySize;
     table.GetCalibratedTimestamps = ::GetCalibratedTimestamps;
     table.QueueSubmit = ::QueueSubmit;
+    table.QueueBindSparse = ::QueueBindSparse;
     table.QueueWaitIdle = ::QueueWaitIdle;
     table.DeviceWaitIdle = ::DeviceWaitIdle;
     table.Wait = ::Wait;

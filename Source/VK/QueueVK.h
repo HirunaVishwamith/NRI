@@ -29,7 +29,7 @@ struct QueueVK final : public DebugNameBase {
         return *m_Lock;
     }
 
-    Result Create(QueueType type, uint32_t familyIndex, VkQueue handle, Lock* sharedLock);
+    Result Create(QueueType type, uint32_t familyIndex, VkQueue handle, Lock* sharedLock, bool familySparse);
 
     //================================================================================================================
     // DebugNameBase
@@ -46,6 +46,7 @@ struct QueueVK final : public DebugNameBase {
     void Annotation(const char* name, uint32_t bgra);
     void GetCalibratedTimestamps(uint64_t& timestampGPU, uint64_t& timestampCPU);
     Result Submit(const QueueSubmitDesc& queueSubmitDesc);
+    Result BindSparse(const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum);
     Result WaitIdle();
 
 private:
@@ -55,6 +56,7 @@ private:
     uint32_t m_FamilyIndex = INVALID_FAMILY_INDEX;
     QueueType m_Type = QueueType(-1);
     Lock m_OwnLock; // storage used when this wrapper owns the lock
+    bool m_FamilySparse = false;
 };
 
 } // namespace nri

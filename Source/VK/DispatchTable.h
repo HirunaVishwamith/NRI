@@ -146,6 +146,8 @@ struct DispatchTable {
     VK_FUNC(CmdBeginRenderPass);                          // - | +
     VK_FUNC(CmdEndRenderPass);                            // - | +
     VK_FUNC(EndCommandBuffer);                            // - | +
+    VK_FUNC(GetImageSparseMemoryRequirements);            // + | +
+    VK_FUNC(QueueBindSparse);                             // - | + may return "VK_ERROR_DEVICE_LOST"
                                                           // v1.1
     VK_FUNC(BindBufferMemory2);                           // + | +
     VK_FUNC(BindImageMemory2);                            // + | +

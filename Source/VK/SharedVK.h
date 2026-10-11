@@ -84,6 +84,14 @@ inline MemoryTypeInfo Unpack(const MemoryType& memoryType) {
     return *(MemoryTypeInfo*)&memoryType;
 }
 
+inline void ClearMustBeDedicated(MemoryDesc& memoryDesc) {
+    memoryDesc.mustBeDedicated = false;
+
+    MemoryTypeInfo memoryTypeInfo = Unpack(memoryDesc.type);
+    memoryTypeInfo.mustBeDedicated = false;
+    memoryDesc.type = Pack(memoryTypeInfo);
+}
+
 static_assert(sizeof(MemoryTypeInfo) == sizeof(MemoryType), "Must be equal");
 
 inline bool IsHostVisibleMemory(MemoryLocation location) {
