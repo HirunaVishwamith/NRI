@@ -34,6 +34,10 @@ struct TextureD3D12 final : public DebugNameBase {
         return GetDimension(GraphicsAPI::D3D12, m_Desc, dimensionIndex, mip);
     }
 
+    inline const TextureTilingDesc& GetTiling() const {
+        return m_Tiling;
+    }
+
     Result Create(const TextureDesc& textureDesc);
     Result Create(const TextureD3D12Desc& textureD3D12Desc);
     Result Allocate(MemoryLocation memoryLocation, float priority, bool committed);
@@ -52,6 +56,7 @@ private:
     ComPtr<ID3D12ResourceBest> m_Texture;
     ComPtr<D3D12MA::Allocation> m_VmaAllocation = nullptr;
     TextureDesc m_Desc = {};
+    TextureTilingDesc m_Tiling = {};
 };
 
 } // namespace nri

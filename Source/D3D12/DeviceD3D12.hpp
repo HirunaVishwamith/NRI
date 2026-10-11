@@ -1220,6 +1220,12 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
     m_Desc.features.extendedDynamicState = true;
     m_Desc.features.resourceAliasing = true;
 
+    const uint8_t tiledTier = (uint8_t)options.TiledResourcesTier;
+    m_Desc.features.sparseTexture = tiledTier >= D3D12_TILED_RESOURCES_TIER_1;
+    m_Desc.features.sparseBuffer = tiledTier >= D3D12_TILED_RESOURCES_TIER_2;
+    m_Desc.sparse.tier = tiledTier;
+    m_Desc.sparse.tileSize = (tiledTier == D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED) ? 0 : D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
+
     ComPtr<ID3D12VideoDevice> videoDevice;
     if (SUCCEEDED(m_Device->QueryInterface(IID_PPV_ARGS(&videoDevice)))) {
         m_Desc.videoFeatures.decode.H264 = IsVideoDecodeCodecSupported(videoDevice, VideoCodec::H264);
@@ -1543,6 +1549,30 @@ void DeviceD3D12::GetMemoryDesc(MemoryLocation memoryLocation, const D3D12_RESOU
     memoryDesc.alignment = (uint32_t)resourceAllocationInfo.Alignment;
     memoryDesc.type = Pack(memoryTypeInfo);
     memoryDesc.mustBeDedicated = mustBeDedicated;
+}
+
+void DeviceD3D12::GetSparseMemoryDesc(MemoryLocation memoryLocation, bool isBuffer, bool isRenderTarget, uint64_t size, MemoryDesc& memoryDesc) const {
+    D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES;
+
+    if (m_Desc.tiers.memory == 0) {
+        if (isBuffer)
+            heapFlags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        else if (isRenderTarget)
+            heapFlags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+        else
+            heapFlags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    }
+
+    MemoryTypeInfo memoryTypeInfo = {};
+    memoryTypeInfo.heapFlags = (uint16_t)heapFlags;
+    memoryTypeInfo.heapType = (uint8_t)GetHeapType(memoryLocation);
+    memoryTypeInfo.mustBeDedicated = false;
+
+    memoryDesc = {};
+    memoryDesc.size = size;
+    memoryDesc.alignment = m_Desc.sparse.tileSize;
+    memoryDesc.type = Pack(memoryTypeInfo);
+    memoryDesc.mustBeDedicated = false;
 }
 
 void DeviceD3D12::GetAccelerationStructurePrebuildInfo(const AccelerationStructureDesc& accelerationStructureDesc, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& prebuildInfo) const {

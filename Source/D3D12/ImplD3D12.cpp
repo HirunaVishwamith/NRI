@@ -213,9 +213,16 @@ static Result NRI_CALL CreateTexture(Device& device, const TextureDesc& textureD
 static void NRI_CALL GetBufferMemoryDesc(const Buffer& buffer, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
     const BufferD3D12& bufferD3D12 = (BufferD3D12&)buffer;
     const DeviceD3D12& deviceD3D12 = bufferD3D12.GetDevice();
+    const BufferDesc& bufferDesc = bufferD3D12.GetDesc();
+
+    if (bufferDesc.usage & BufferUsageBits::SPARSE) {
+        deviceD3D12.GetSparseMemoryDesc(memoryLocation, true, false, bufferDesc.size, memoryDesc);
+
+        return;
+    }
 
     D3D12_RESOURCE_DESC1 desc = {};
-    deviceD3D12.GetResourceDesc(bufferD3D12.GetDesc(), desc);
+    deviceD3D12.GetResourceDesc(bufferDesc, desc);
 
     deviceD3D12.GetMemoryDesc(memoryLocation, desc, memoryDesc);
 }
@@ -223,11 +230,24 @@ static void NRI_CALL GetBufferMemoryDesc(const Buffer& buffer, MemoryLocation me
 static void NRI_CALL GetTextureMemoryDesc(const Texture& texture, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
     const TextureD3D12& textureD3D12 = (TextureD3D12&)texture;
     const DeviceD3D12& deviceD3D12 = textureD3D12.GetDevice();
+    const TextureDesc& textureDesc = textureD3D12.GetDesc();
+
+    if (textureDesc.usage & TextureUsageBits::SPARSE) {
+        const bool isRenderTarget = (textureDesc.usage & (TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT)) != 0;
+        const uint64_t size = (uint64_t)textureD3D12.GetTiling().totalTileNum * deviceD3D12.GetDesc().sparse.tileSize;
+        deviceD3D12.GetSparseMemoryDesc(memoryLocation, false, isRenderTarget, size, memoryDesc);
+
+        return;
+    }
 
     D3D12_RESOURCE_DESC1 desc = {};
-    deviceD3D12.GetResourceDesc(textureD3D12.GetDesc(), desc);
+    deviceD3D12.GetResourceDesc(textureDesc, desc);
 
     deviceD3D12.GetMemoryDesc(memoryLocation, desc, memoryDesc);
+}
+
+static void NRI_CALL GetTextureTiling(const Texture& texture, TextureTilingDesc& tilingDesc) {
+    tilingDesc = ((const TextureD3D12&)texture).GetTiling();
 }
 
 static Result NRI_CALL BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
@@ -241,6 +261,12 @@ static Result NRI_CALL BindTextureMemory(const BindTextureMemoryDesc* bindTextur
 static void NRI_CALL GetBufferMemoryDesc2(const Device& device, const BufferDesc& bufferDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
     const DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
 
+    if (bufferDesc.usage & BufferUsageBits::SPARSE) {
+        deviceD3D12.GetSparseMemoryDesc(memoryLocation, true, false, 0, memoryDesc);
+
+        return;
+    }
+
     D3D12_RESOURCE_DESC1 desc = {};
     deviceD3D12.GetResourceDesc(bufferDesc, desc);
 
@@ -249,6 +275,13 @@ static void NRI_CALL GetBufferMemoryDesc2(const Device& device, const BufferDesc
 
 static void NRI_CALL GetTextureMemoryDesc2(const Device& device, const TextureDesc& textureDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
     const DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
+
+    if (textureDesc.usage & TextureUsageBits::SPARSE) {
+        const bool isRenderTarget = (textureDesc.usage & (TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT)) != 0;
+        deviceD3D12.GetSparseMemoryDesc(memoryLocation, false, isRenderTarget, 0, memoryDesc);
+
+        return;
+    }
 
     D3D12_RESOURCE_DESC1 desc = {};
     deviceD3D12.GetResourceDesc(textureDesc, desc);
@@ -263,7 +296,14 @@ static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memo
     if (result != Result::SUCCESS)
         return result;
 
-    return ((BufferD3D12*)buffer)->Allocate(memoryLocation, priority, true);
+    result = ((BufferD3D12*)buffer)->Allocate(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS && (bufferDesc.usage & BufferUsageBits::SPARSE)) {
+        Destroy((BufferD3D12*)buffer);
+        buffer = nullptr;
+    }
+
+    return result;
 }
 
 static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
@@ -273,7 +313,14 @@ static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation mem
     if (result != Result::SUCCESS)
         return result;
 
-    return ((TextureD3D12*)texture)->Allocate(memoryLocation, priority, true);
+    result = ((TextureD3D12*)texture)->Allocate(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS && (textureDesc.usage & TextureUsageBits::SPARSE)) {
+        Destroy((TextureD3D12*)texture);
+        texture = nullptr;
+    }
+
+    return result;
 }
 
 static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
@@ -287,6 +334,11 @@ static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64
         result = ((BufferD3D12*)buffer)->BindMemory(*(MemoryD3D12*)memory, offset);
     else
         result = ((BufferD3D12*)buffer)->Allocate((MemoryLocation)offset, 0.0f, false);
+
+    if (result != Result::SUCCESS && (bufferDesc.usage & BufferUsageBits::SPARSE)) {
+        Destroy((BufferD3D12*)buffer);
+        buffer = nullptr;
+    }
 
     return result;
 }
@@ -302,6 +354,11 @@ static Result NRI_CALL CreatePlacedTexture(Device& device, Memory* memory, uint6
         result = ((TextureD3D12*)texture)->BindMemory(*(MemoryD3D12*)memory, offset);
     else
         result = ((TextureD3D12*)texture)->Allocate((MemoryLocation)offset, 0.0f, false);
+
+    if (result != Result::SUCCESS && (textureDesc.usage & TextureUsageBits::SPARSE)) {
+        Destroy((TextureD3D12*)texture);
+        texture = nullptr;
+    }
 
     return result;
 }
@@ -543,6 +600,10 @@ static void NRI_CALL GetCalibratedTimestamps(Queue& queue, uint64_t& timestampGP
     ((QueueD3D12&)queue).GetCalibratedTimestamps(timestampGPU, timestampCPU);
 }
 
+static Result NRI_CALL QueueBindSparse(Queue& queue, const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum) {
+    return ((QueueD3D12&)queue).BindSparse(bufferMappings, bufferMappingNum, textureMappings, textureMappingNum);
+}
+
 static Result NRI_CALL QueueSubmit(Queue& queue, const QueueSubmitDesc& queueSubmitDesc) {
     return ((QueueD3D12&)queue).Submit(queueSubmitDesc);
 }
@@ -682,6 +743,7 @@ Result DeviceD3D12::FillFunctionTable(CoreInterface& table) const {
     table.CreateTexture = ::CreateTexture;
     table.GetBufferMemoryDesc = ::GetBufferMemoryDesc;
     table.GetTextureMemoryDesc = ::GetTextureMemoryDesc;
+    table.GetTextureTiling = ::GetTextureTiling;
     table.BindBufferMemory = ::BindBufferMemory;
     table.BindTextureMemory = ::BindTextureMemory;
     table.GetBufferMemoryDesc2 = ::GetBufferMemoryDesc2;
@@ -745,6 +807,7 @@ Result DeviceD3D12::FillFunctionTable(CoreInterface& table) const {
     table.GetQuerySize = ::GetQuerySize;
     table.GetCalibratedTimestamps = ::GetCalibratedTimestamps;
     table.QueueSubmit = ::QueueSubmit;
+    table.QueueBindSparse = ::QueueBindSparse;
     table.QueueWaitIdle = ::QueueWaitIdle;
     table.DeviceWaitIdle = ::DeviceWaitIdle;
     table.Wait = ::Wait;

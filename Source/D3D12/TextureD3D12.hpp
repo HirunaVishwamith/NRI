@@ -3,6 +3,82 @@
 Result TextureD3D12::Create(const TextureDesc& textureDesc) {
     m_Desc = FixTextureDesc(textureDesc);
 
+    if (!(m_Desc.usage & TextureUsageBits::SPARSE))
+        return Result::SUCCESS;
+
+    const DeviceDesc& deviceDesc = m_Device.GetDesc();
+
+    if (!deviceDesc.features.sparseTexture || deviceDesc.sparse.tileSize == 0)
+        return Result::UNSUPPORTED;
+
+    if (m_Desc.type == TextureType::TEXTURE_1D)
+        return Result::UNSUPPORTED;
+
+    if (m_Desc.type == TextureType::TEXTURE_3D && deviceDesc.sparse.tier < 3)
+        return Result::UNSUPPORTED;
+
+    if ((m_Desc.layerNum > 1 || m_Desc.sampleNum > 1) && deviceDesc.sparse.tier < 2)
+        return Result::UNSUPPORTED;
+
+    if (m_Desc.usage & (TextureUsageBits::VIDEO_DECODE | TextureUsageBits::VIDEO_ENCODE | TextureUsageBits::VIDEO_REFERENCE_ONLY))
+        return Result::UNSUPPORTED;
+
+    D3D12_CLEAR_VALUE clearValue = {GetDxgiFormat(m_Desc.format).typed};
+
+    const FormatProps& formatProps = GetFormatProps(m_Desc.format);
+    if (formatProps.isDepth || formatProps.isStencil) {
+        clearValue.DepthStencil.Depth = m_Desc.optimizedClearValue.depthStencil.depth;
+        clearValue.DepthStencil.Stencil = m_Desc.optimizedClearValue.depthStencil.stencil;
+    } else {
+        clearValue.Color[0] = m_Desc.optimizedClearValue.color.f.x;
+        clearValue.Color[1] = m_Desc.optimizedClearValue.color.f.y;
+        clearValue.Color[2] = m_Desc.optimizedClearValue.color.f.z;
+        clearValue.Color[3] = m_Desc.optimizedClearValue.color.f.w;
+    }
+
+    D3D12_RESOURCE_DESC1 desc1 = {};
+    m_Device.GetResourceDesc(m_Desc, desc1);
+    desc1.Alignment = 0;
+    desc1.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+    desc1.Flags &= ~D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT;
+#endif
+
+    const bool isRenderableSurface = desc1.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+    if (m_Device.GetVersion() >= 10 && deviceDesc.features.enhancedBarriers) {
+        HRESULT hr = m_Device->CreateReservedResource2((const D3D12_RESOURCE_DESC*)&desc1, D3D12_BARRIER_LAYOUT_COMMON, isRenderableSurface ? &clearValue : nullptr, nullptr, NO_CASTABLE_FORMATS, IID_PPV_ARGS(&m_Texture));
+        NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device10::CreateReservedResource2");
+    } else
+#endif
+    {
+        HRESULT hr = m_Device->CreateReservedResource1((const D3D12_RESOURCE_DESC*)&desc1, D3D12_RESOURCE_STATE_COMMON, isRenderableSurface ? &clearValue : nullptr, nullptr, IID_PPV_ARGS(&m_Texture));
+        NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device4::CreateReservedResource1");
+    }
+
+    UINT totalTileNum = 0;
+    D3D12_PACKED_MIP_INFO packedMipInfo = {};
+    D3D12_TILE_SHAPE tileShape = {};
+    UINT subresourceNum = 0;
+    m_Device->GetResourceTiling(m_Texture, &totalTileNum, &packedMipInfo, &tileShape, &subresourceNum, 0, nullptr);
+
+    if (totalTileNum == 0 || tileShape.WidthInTexels == 0 || tileShape.HeightInTexels == 0 || tileShape.DepthInTexels == 0)
+        return Result::UNSUPPORTED;
+
+    if (tileShape.WidthInTexels > 0xFFFF || tileShape.HeightInTexels > 0xFFFF || tileShape.DepthInTexels > 0xFFFF)
+        return Result::UNSUPPORTED;
+
+    m_Tiling = {};
+    m_Tiling.tileWidth = (Dim_t)tileShape.WidthInTexels;
+    m_Tiling.tileHeight = (Dim_t)tileShape.HeightInTexels;
+    m_Tiling.tileDepth = (Dim_t)tileShape.DepthInTexels;
+    m_Tiling.packedMipNum = (Dim_t)packedMipInfo.NumPackedMips;
+    m_Tiling.packedTileNum = packedMipInfo.NumTilesForPackedMips;
+    m_Tiling.totalTileNum = totalTileNum;
+    m_Tiling.singlePackedTail = false;
+
     return Result::SUCCESS;
 }
 
@@ -16,6 +92,9 @@ Result TextureD3D12::Create(const TextureD3D12Desc& textureD3D12Desc) {
 }
 
 Result TextureD3D12::Allocate(MemoryLocation memoryLocation, float priority, bool committed) {
+    if (m_Desc.usage & TextureUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(!m_Texture, "Unexpected");
 
     D3D12_CLEAR_VALUE clearValue = {GetDxgiFormat(m_Desc.format).typed};
@@ -78,6 +157,9 @@ Result TextureD3D12::Allocate(MemoryLocation memoryLocation, float priority, boo
 }
 
 Result TextureD3D12::BindMemory(const MemoryD3D12& memory, uint64_t offset) {
+    if (m_Desc.usage & TextureUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(!m_Texture, "Unexpected");
 
     D3D12_CLEAR_VALUE clearValue = {GetDxgiFormat(m_Desc.format).typed};

@@ -3,6 +3,41 @@
 Result BufferD3D12::Create(const BufferDesc& bufferDesc) {
     m_Desc = bufferDesc;
 
+    if (!(m_Desc.usage & BufferUsageBits::SPARSE))
+        return Result::SUCCESS;
+
+    const DeviceDesc& deviceDesc = m_Device.GetDesc();
+
+    if (!deviceDesc.features.sparseBuffer || deviceDesc.sparse.tileSize == 0)
+        return Result::UNSUPPORTED;
+
+    if (m_Desc.usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE))
+        return Result::UNSUPPORTED;
+
+    if ((m_Desc.size % deviceDesc.sparse.tileSize) != 0)
+        return Result::INVALID_ARGUMENT;
+
+    D3D12_RESOURCE_DESC1 desc1 = {};
+    m_Device.GetResourceDesc(m_Desc, desc1);
+    desc1.Alignment = 0;
+
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+    desc1.Flags &= ~D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT;
+#endif
+
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+    const bool useEnhancedBarriers = m_Device.GetVersion() >= 10 && deviceDesc.features.enhancedBarriers;
+
+    if (useEnhancedBarriers) {
+        HRESULT hr = m_Device->CreateReservedResource2((const D3D12_RESOURCE_DESC*)&desc1, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, NO_CASTABLE_FORMATS, IID_PPV_ARGS(&m_Buffer));
+        NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device10::CreateReservedResource2");
+    } else
+#endif
+    {
+        HRESULT hr = m_Device->CreateReservedResource1((const D3D12_RESOURCE_DESC*)&desc1, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, IID_PPV_ARGS(&m_Buffer));
+        NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device4::CreateReservedResource1");
+    }
+
     return Result::SUCCESS;
 }
 
@@ -18,6 +53,9 @@ Result BufferD3D12::Create(const BufferD3D12Desc& bufferD3D12Desc) {
 }
 
 Result BufferD3D12::Allocate(MemoryLocation memoryLocation, float priority, bool committed) {
+    if (m_Desc.usage & BufferUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(!m_Buffer, "Unexpected");
 
     uint32_t flags = D3D12MA::ALLOCATION_FLAG_STRATEGY_MIN_MEMORY;
@@ -68,6 +106,9 @@ Result BufferD3D12::Allocate(MemoryLocation memoryLocation, float priority, bool
 }
 
 Result BufferD3D12::BindMemory(const MemoryD3D12& memory, uint64_t offset) {
+    if (m_Desc.usage & BufferUsageBits::SPARSE)
+        return Result::UNSUPPORTED;
+
     NRI_CHECK(!m_Buffer, "Unexpected");
 
     const D3D12_HEAP_DESC& heapDesc = memory.GetHeapDesc();

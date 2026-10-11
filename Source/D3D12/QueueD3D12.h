@@ -44,6 +44,7 @@ struct QueueD3D12 final : public DebugNameBase {
     void Annotation(const char* name, uint32_t bgra);
     void GetCalibratedTimestamps(uint64_t& timestampGPU, uint64_t& timestampCPU);
     Result Submit(const QueueSubmitDesc& queueSubmitDesc);
+    Result BindSparse(const SparseBufferMappingDesc* bufferMappings, uint32_t bufferMappingNum, const SparseTextureMappingDesc* textureMappings, uint32_t textureMappingNum);
     Result WaitIdle();
 
 private:
